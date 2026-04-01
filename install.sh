@@ -35,17 +35,20 @@ create_env_file() {
         read -p "Enter the domain name for your application (e.g., example.com): " domain_name
         read -p "Enter your email address for Let's Encrypt: " email
         needs_letsencrypt=true
+        # In production, enforce standard HTTP/HTTPS ports for a predictable, secure deployment
+        http_port=80
+        https_port=443
     else
         read -p "Enter localhost or IP address [localhost]: " domain_name
         domain_name=${domain_name:-localhost}
         email="noreply@localhost"
         needs_letsencrypt=false
+        
+        read -p "Enter HTTP port [default: 80]: " http_port
+        http_port=${http_port:-80}
+        read -p "Enter HTTPS port [default: 443]: " https_port
+        https_port=${https_port:-443}
     fi
-    
-    read -p "Enter HTTP port [default: 80]: " http_port
-    http_port=${http_port:-80}
-    read -p "Enter HTTPS port [default: 443]: " https_port
-    https_port=${https_port:-443}
     
     postgres_password=$(generate_password)
     redis_password=$(generate_password)
