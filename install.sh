@@ -19,9 +19,17 @@ generate_password() { openssl rand -base64 18 | tr -d "=+/" | cut -c1-16; }
 generate_secret_key() { openssl rand -base64 32; }
 
 create_env_file() {
-    # Ask for environment type
-    read -p "Is this for production or development? (prod/dev) [dev]: " env_type
-    env_type=${env_type:-dev}
+    # Ask for environment type with validation
+    while true; do
+        read -p "Is this for production or development? (prod/dev) [dev]: " env_type
+        env_type=${env_type:-dev}
+        env_type=$(echo "$env_type" | tr '[:upper:]' '[:lower:]')
+        if [[ "$env_type" == "prod" || "$env_type" == "dev" ]]; then
+            break
+        else
+            warning "Invalid environment type. Please enter 'prod' or 'dev'."
+        fi
+    done
     
     if [[ $env_type == "prod" ]]; then
         read -p "Enter the domain name for your application (e.g., example.com): " domain_name
@@ -43,18 +51,37 @@ create_env_file() {
     redis_password=$(generate_password)
     secret_key=$(generate_secret_key)
 
+    # Build URLs and CORS settings based on environment and ports
+    if [[ $env_type == "dev" ]]; then
+        # Development: Use HTTP and appropriate ports
+        api_url="http://$domain_name:$http_port/api"
+        frontend_url="http://$domain_name:$http_port"
+        allowed_hosts="$domain_name,localhost,127.0.0.1"
+        if [ "$http_port" = "80" ]; then
+            cors_origins="http://$domain_name,http://localhost:8080,http://127.0.0.1:8080"
+        else
+            cors_origins="http://$domain_name:$http_port,http://localhost:$http_port,http://127.0.0.1:$http_port"
+        fi
+    else
+        # Production: Use HTTPS with domain and www variant
+        api_url="https://$domain_name/api"
+        frontend_url="https://$domain_name"
+        allowed_hosts="$domain_name,www.$domain_name,localhost,127.0.0.1"
+        cors_origins="https://$domain_name,https://www.$domain_name"
+    fi
+
     cat > .env << EOF
 # General settings
 DOMAIN_NAME=$domain_name
-API_URL=https://$domain_name/api
-FRONTEND_URL=https://$domain_name
+API_URL=$api_url
+FRONTEND_URL=$frontend_url
 ENVIRONMENT_TYPE=$env_type
 
 # Django settings
 DEBUG=$([ "$env_type" = "dev" ] && echo "True" || echo "False")
 SECRET_KEY=$secret_key
-DJANGO_ALLOWED_HOSTS=$domain_name,localhost,127.0.0.1
-CORS_ALLOWED_ORIGINS=https://$domain_name,http://localhost:8080,http://127.0.0.1:8080
+DJANGO_ALLOWED_HOSTS=$allowed_hosts
+CORS_ALLOWED_ORIGINS=$cors_origins
 
 # Database settings
 POSTGRES_DB=Oju_db
@@ -76,6 +103,13 @@ CELERY_RESULT_BACKEND=redis://:$redis_password@redis:6379/0
 # Let's Encrypt settings
 CERTBOT_EMAIL=$email
 USE_LETSENCRYPT=$needs_letsencrypt
+
+# SSL certificate settings (for self-signed fallback in prod, or direct use in dev)
+SSL_COUNTRY=US
+SSL_STATE=State
+SSL_CITY=City
+SSL_ORG=Organization
+SSL_ORG_UNIT=IT
 
 # Frontend settings
 NODE_ENV=$([ "$env_type" = "dev" ] && echo "development" || echo "production")
@@ -129,8 +163,16 @@ fi
 http_port=$(grep "^NGINX_HTTP_PORT=" .env | cut -d'=' -f2)
 https_port=$(grep "^NGINX_HTTPS_PORT=" .env | cut -d'=' -f2)
 
+# Default to standard ports if missing or invalid, and ensure ports are numeric
+if ! [[ "$http_port" =~ ^[0-9]+$ ]]; then
+    http_port=80
+fi
+if ! [[ "$https_port" =~ ^[0-9]+$ ]]; then
+    https_port=443
+fi
+
 info "Checking if ports $http_port and $https_port are available..."
-if lsof -i :$http_port 2>/dev/null || lsof -i :$https_port 2>/dev/null; then
+if lsof -i :"$http_port" 2>/dev/null || lsof -i :"$https_port" 2>/dev/null; then
     warning "Ports $http_port or $https_port are already in use."
     read -p "Continue anyway? (y/N): " proceed
     [[ ! $proceed =~ ^[yY]$ ]] && error "Aborting installation." && exit 1
@@ -171,26 +213,23 @@ if [[ $env_type == "prod" ]]; then
     # Collect SSL certificate info for self-signed fallback
     read -p "Enter Country Name (2 letter code) [US]: " ssl_country
     ssl_country=${ssl_country:-US}
+    sed -i "/^SSL_COUNTRY=/c\\SSL_COUNTRY=$ssl_country" .env
 
     read -p "Enter State or Province Name [State]: " ssl_state
     ssl_state=${ssl_state:-State}
+    sed -i "/^SSL_STATE=/c\\SSL_STATE=$ssl_state" .env
 
     read -p "Enter City [City]: " ssl_city
     ssl_city=${ssl_city:-City}
+    sed -i "/^SSL_CITY=/c\\SSL_CITY=$ssl_city" .env
 
     read -p "Enter Organization Name [Organization]: " ssl_org
     ssl_org=${ssl_org:-Organization}
+    sed -i "/^SSL_ORG=/c\\SSL_ORG=$ssl_org" .env
 
     read -p "Enter Organizational Unit Name [IT]: " ssl_org_unit
     ssl_org_unit=${ssl_org_unit:-IT}
-
-    # Export SSL certificate info
-    echo "# SSL Certificate Info" >> .env
-    echo "SSL_COUNTRY=$ssl_country" >> .env
-    echo "SSL_STATE=$ssl_state" >> .env
-    echo "SSL_CITY=$ssl_city" >> .env
-    echo "SSL_ORG=$ssl_org" >> .env
-    echo "SSL_ORG_UNIT=$ssl_org_unit" >> .env
+    sed -i "/^SSL_ORG_UNIT=/c\\SSL_ORG_UNIT=$ssl_org_unit" .env
 
     # Start Nginx first to handle ACME challenge
     info "Starting Nginx for certificate validation..."
@@ -203,9 +242,11 @@ if [[ $env_type == "prod" ]]; then
     if ! docker-compose run --rm certbot-init $CERTBOT_ARGS; then
         warning "Failed to obtain Let's Encrypt certificate. Self-signed certificates will be used."
         USE_LETSENCRYPT=false
+        sed -i "/^USE_LETSENCRYPT=/c\\USE_LETSENCRYPT=false" .env
     else
         success "Let's Encrypt certificates obtained successfully!"
         USE_LETSENCRYPT=true
+        sed -i "/^USE_LETSENCRYPT=/c\\USE_LETSENCRYPT=true" .env
     fi
 
     # Reload Nginx to use the new certificate
@@ -231,10 +272,11 @@ else
     
     mkdir -p ./nginx/ssl
     
-    # Generate self-signed certificate
-    openssl req -x509 -newkey rsa:4096 -keyout ./nginx/ssl/private.key -out ./nginx/ssl/certificate.crt \
+    # Generate self-signed certificate matching nginx's expected filenames, including SAN
+    openssl req -x509 -newkey rsa:4096 -keyout ./nginx/ssl/key.pem -out ./nginx/ssl/cert.pem \
         -days 365 -nodes \
-        -subj "/C=US/ST=State/L=City/O=Organization/CN=$domain_name" 2>/dev/null
+        -subj "/C=US/ST=State/L=City/O=Organization/CN=$domain_name" \
+        -addext "subjectAltName=DNS:$domain_name" 2>/dev/null
     
     success "Self-signed certificate generated for $domain_name"
     info "Note: You will see browser warnings about untrusted certificates. This is normal for development."
