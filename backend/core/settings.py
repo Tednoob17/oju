@@ -213,10 +213,11 @@ CORS_ALLOW_CREDENTIALS = True
 # CSRF Configuration
 CSRF_COOKIE_NAME = 'csrftoken'
 CSRF_HEADER_NAME = 'HTTP_X_CSRFTOKEN'
-CSRF_COOKIE_SECURE = not DEBUG
-CSRF_TRUSTED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=[
+CSRF_COOKIE_SECURE = env.bool('CSRF_COOKIE_SECURE', default=not DEBUG)  # True in prod, configurable via env
+CSRF_COOKIE_HTTPONLY = True  # Prevent JavaScript access
+CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[
     "http://localhost:8000",
-    "http://127.0.1:8000",
+    "http://127.0.0.1:8000",
     ])
 
 
@@ -262,8 +263,8 @@ SESSION_ENGINE = "django.contrib.sessions.backends.cache"
 SESSION_CACHE_ALIAS = "sessions" 
 SESSION_COOKIE_AGE = 60 * 60 * 24 * 7  # 7 jours
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SECURE = not DEBUG
-SESSION_COOKIE_SAMESITE = 'Lax'
+SESSION_COOKIE_SECURE = env.bool('SESSION_COOKIE_SECURE', default=not DEBUG)  # True in prod, configurable via env
+SESSION_COOKIE_SAMESITE = 'Lax'  # Lax aligns with nginx proxy_cookie_path config
 
 
 LOGGING = {
