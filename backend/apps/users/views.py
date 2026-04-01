@@ -160,8 +160,8 @@ class AuthViewSet(viewsets.GenericViewSet):
                 
                 if user and user.failed_login_attempts >= max_attempts:
                     
-                    if user.last_failed_login and (timezone.now() - user.last_failed_login).seconds < lockout_time:
-                        remaining_time = lockout_time - (timezone.now() - user.last_failed_login).seconds
+                    if user.last_failed_login and (timezone.now() - user.last_failed_login).total_seconds() < lockout_time:
+                        remaining_time = lockout_time - (timezone.now() - user.last_failed_login).total_seconds()
                         
                         return Response(
                             {
