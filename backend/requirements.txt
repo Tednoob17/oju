@@ -10,8 +10,7 @@ drf-yasg==1.21.7
 celery==5.3.6
 redis==5.0.1
 gunicorn==23.0.0
-rest-framework-simplejwt==5.4.0
-djangorestframework-datatables==0.7.8
+djangorestframework-datatables==0.7.2
 python-jwt==4.1.0
 django-redis==5.4.0
 channels-redis==4.2.0

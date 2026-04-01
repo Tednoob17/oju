@@ -19,8 +19,26 @@ generate_password() { openssl rand -base64 18 | tr -d "=+/" | cut -c1-16; }
 generate_secret_key() { openssl rand -base64 32; }
 
 create_env_file() {
-    read -p "Enter the domain name for your application (e.g., example.com): " domain_name
-    read -p "Enter your email address for Let's Encrypt: " email
+    # Ask for environment type
+    read -p "Is this for production or development? (prod/dev) [dev]: " env_type
+    env_type=${env_type:-dev}
+    
+    if [[ $env_type == "prod" ]]; then
+        read -p "Enter the domain name for your application (e.g., example.com): " domain_name
+        read -p "Enter your email address for Let's Encrypt: " email
+        needs_letsencrypt=true
+    else
+        read -p "Enter localhost or IP address [localhost]: " domain_name
+        domain_name=${domain_name:-localhost}
+        email="noreply@localhost"
+        needs_letsencrypt=false
+    fi
+    
+    read -p "Enter HTTP port [default: 80]: " http_port
+    http_port=${http_port:-80}
+    read -p "Enter HTTPS port [default: 443]: " https_port
+    https_port=${https_port:-443}
+    
     postgres_password=$(generate_password)
     redis_password=$(generate_password)
     secret_key=$(generate_secret_key)
@@ -30,12 +48,13 @@ create_env_file() {
 DOMAIN_NAME=$domain_name
 API_URL=https://$domain_name/api
 FRONTEND_URL=https://$domain_name
+ENVIRONMENT_TYPE=$env_type
 
 # Django settings
-DEBUG=False
+DEBUG=$([ "$env_type" = "dev" ] && echo "True" || echo "False")
 SECRET_KEY=$secret_key
-DJANGO_ALLOWED_HOSTS=$domain_name,www.$domain_name
-CORS_ALLOWED_ORIGINS=https://$domain_name,https://www.$domain_name
+DJANGO_ALLOWED_HOSTS=$domain_name,localhost,127.0.0.1
+CORS_ALLOWED_ORIGINS=https://$domain_name,http://localhost:8080,http://127.0.0.1:8080
 
 # Database settings
 POSTGRES_DB=Oju_db
@@ -56,22 +75,31 @@ CELERY_RESULT_BACKEND=redis://:$redis_password@redis:6379/0
 
 # Let's Encrypt settings
 CERTBOT_EMAIL=$email
+USE_LETSENCRYPT=$needs_letsencrypt
 
 # Frontend settings
-NODE_ENV=production
+NODE_ENV=$([ "$env_type" = "dev" ] && echo "development" || echo "production")
+
+# Nginx ports
+NGINX_HTTP_PORT=$http_port
+NGINX_HTTPS_PORT=$https_port
 EOF
 
     success "Environment file created successfully."
     info "Environment variables:"
     echo
+    echo "ENVIRONMENT_TYPE=$env_type"
     echo "DOMAIN_NAME=$domain_name"
+    echo "DEBUG=$([ "$env_type" = "dev" ] && echo "True" || echo "False")"
     echo "API_URL=https://$domain_name/api"
-    echo "DJANGO_ALLOWED_HOSTS=$domain_name,www.$domain_name"
+    echo "DJANGO_ALLOWED_HOSTS=$domain_name,localhost,127.0.0.1"
     echo "POSTGRES_DB=Oju_db"
     echo "POSTGRES_USER=postgres"
     echo "POSTGRES_PASSWORD=$postgres_password"
     echo "REDIS_PASSWORD=$redis_password"
-    echo "SECRET_KEY=$secret_key"
+    echo "NGINX_HTTP_PORT=$http_port"
+    echo "NGINX_HTTPS_PORT=$https_port"
+    echo "USE_LETSENCRYPT=$needs_letsencrypt"
     echo
 }
 
@@ -98,9 +126,12 @@ else
 fi
 
 # Check for port conflicts
-info "Checking if ports 80 and 443 are available..."
-if lsof -i :80 || lsof -i :443; then
-    warning "Ports 80 or 443 are already in use."
+http_port=$(grep "^NGINX_HTTP_PORT=" .env | cut -d'=' -f2)
+https_port=$(grep "^NGINX_HTTPS_PORT=" .env | cut -d'=' -f2)
+
+info "Checking if ports $http_port and $https_port are available..."
+if lsof -i :$http_port 2>/dev/null || lsof -i :$https_port 2>/dev/null; then
+    warning "Ports $http_port or $https_port are already in use."
     read -p "Continue anyway? (y/N): " proceed
     [[ ! $proceed =~ ^[yY]$ ]] && error "Aborting installation." && exit 1
 else
@@ -122,68 +153,95 @@ info "Docker images built successfully."
 # Configure SSL certificates
 info "Configuring SSL certificates..."
 
-# Ask about Let's Encrypt staging mode
-read -p "Do you want to use Let's Encrypt staging mode (for testing without rate limits)? (y/N): " use_staging
-staging_flag=""
-if [[ $use_staging == "y" || $use_staging == "Y" ]]; then
-    staging_flag="--staging"
-fi
+# Get environment type from .env
+env_type=$(grep "^ENVIRONMENT_TYPE=" .env | cut -d'=' -f2)
 
-# Collect SSL certificate info for self-signed fallback
-read -p "Enter Country Name (2 letter code) [XX]: " ssl_country
-ssl_country=${ssl_country:-XX}
-
-read -p "Enter State or Province Name [State]: " ssl_state
-ssl_state=${ssl_state:-State}
-
-read -p "Enter City [City]: " ssl_city
-ssl_city=${ssl_city:-City}
-
-read -p "Enter Organization Name [Organization]: " ssl_org
-ssl_org=${ssl_org:-Organization}
-
-read -p "Enter Organizational Unit Name [IT]: " ssl_org_unit
-ssl_org_unit=${ssl_org_unit:-IT}
-
-# Export SSL certificate info as environment variables
-echo "# SSL Certificate Info" >> .env
-echo "SSL_COUNTRY=$ssl_country" >> .env
-echo "SSL_STATE=$ssl_state" >> .env
-echo "SSL_CITY=$ssl_city" >> .env
-echo "SSL_ORG=$ssl_org" >> .env
-echo "SSL_ORG_UNIT=$ssl_org_unit" >> .env
-
-# Start Nginx first to handle ACME challenge
-echo "### Starting Nginx ###"
-docker-compose up -d nginx
-
-# Request Let's Encrypt certificate
-echo "### Requesting Let's Encrypt certificate for $domain_name ###"
-CERTBOT_ARGS="--email $email -d $domain_name -d www.$domain_name --no-eff-email $staging_flag"
-
-if ! docker-compose run --rm certbot-init $CERTBOT_ARGS; then
-    warning "Failed to obtain Let's Encrypt certificate. Self-signed certificates will be used."
-    USE_LETSENCRYPT=false
-else
-    success "Let's Encrypt certificates obtained successfully!"
-    USE_LETSENCRYPT=true
-fi
-
-# Reload Nginx to use the new certificate
-docker-compose exec nginx nginx -s reload
-
-echo "### SSL setup completed! ###"
-if [ "$USE_LETSENCRYPT" = true ]; then
+if [[ $env_type == "prod" ]]; then
+    # Production: Use Let's Encrypt
+    email=$(grep "^CERTBOT_EMAIL=" .env | cut -d'=' -f2)
+    domain_name=$(grep "^DOMAIN_NAME=" .env | cut -d'=' -f2)
+    
+    # Ask about Let's Encrypt staging mode
+    read -p "Do you want to use Let's Encrypt staging mode (for testing without rate limits)? (y/N): " use_staging
+    staging_flag=""
     if [[ $use_staging == "y" || $use_staging == "Y" ]]; then
-        warning "You used Let's Encrypt staging mode. The certificates are not trusted."
-        warning "When you're ready for production, run: ./update-certs.sh"
+        staging_flag="--staging"
+    fi
+
+    # Collect SSL certificate info for self-signed fallback
+    read -p "Enter Country Name (2 letter code) [US]: " ssl_country
+    ssl_country=${ssl_country:-US}
+
+    read -p "Enter State or Province Name [State]: " ssl_state
+    ssl_state=${ssl_state:-State}
+
+    read -p "Enter City [City]: " ssl_city
+    ssl_city=${ssl_city:-City}
+
+    read -p "Enter Organization Name [Organization]: " ssl_org
+    ssl_org=${ssl_org:-Organization}
+
+    read -p "Enter Organizational Unit Name [IT]: " ssl_org_unit
+    ssl_org_unit=${ssl_org_unit:-IT}
+
+    # Export SSL certificate info
+    echo "# SSL Certificate Info" >> .env
+    echo "SSL_COUNTRY=$ssl_country" >> .env
+    echo "SSL_STATE=$ssl_state" >> .env
+    echo "SSL_CITY=$ssl_city" >> .env
+    echo "SSL_ORG=$ssl_org" >> .env
+    echo "SSL_ORG_UNIT=$ssl_org_unit" >> .env
+
+    # Start Nginx first to handle ACME challenge
+    info "Starting Nginx for certificate validation..."
+    docker-compose up -d nginx
+
+    # Request Let's Encrypt certificate
+    info "Requesting Let's Encrypt certificate for $domain_name..."
+    CERTBOT_ARGS="--email $email -d $domain_name -d www.$domain_name --no-eff-email $staging_flag"
+
+    if ! docker-compose run --rm certbot-init $CERTBOT_ARGS; then
+        warning "Failed to obtain Let's Encrypt certificate. Self-signed certificates will be used."
+        USE_LETSENCRYPT=false
     else
-        success "Let's Encrypt certificates are successfully installed."
-        info "Certificates will automatically renew every 60 days."
+        success "Let's Encrypt certificates obtained successfully!"
+        USE_LETSENCRYPT=true
+    fi
+
+    # Reload Nginx to use the new certificate
+    docker-compose exec nginx nginx -s reload
+
+    echo "### SSL setup completed! ###"
+    if [ "$USE_LETSENCRYPT" = true ]; then
+        if [[ $use_staging == "y" || $use_staging == "Y" ]]; then
+            warning "You used Let's Encrypt staging mode. The certificates are not trusted."
+            warning "When you're ready for production, run: ./update-certs.sh"
+        else
+            success "Let's Encrypt certificates are successfully installed."
+            info "Certificates will automatically renew every 60 days."
+        fi
+    else
+        warning "Using self-signed certificates. These are not trusted by browsers."
+        info "You can try to get Let's Encrypt certificates later by running: ./update-certs.sh"
     fi
 else
-    warning "Using self-signed certificates. These are not trusted by browsers."
-    info "You can try to get Let's Encrypt certificates later by running: ./update-certs.sh"
+    # Development: Use self-signed certificates
+    info "Setting up self-signed certificates for development..."
+    domain_name=$(grep "^DOMAIN_NAME=" .env | cut -d'=' -f2)
+    
+    mkdir -p ./nginx/ssl
+    
+    # Generate self-signed certificate
+    openssl req -x509 -newkey rsa:4096 -keyout ./nginx/ssl/private.key -out ./nginx/ssl/certificate.crt \
+        -days 365 -nodes \
+        -subj "/C=US/ST=State/L=City/O=Organization/CN=$domain_name" 2>/dev/null
+    
+    success "Self-signed certificate generated for $domain_name"
+    info "Note: You will see browser warnings about untrusted certificates. This is normal for development."
+    
+    # Start Nginx
+    info "Starting Nginx..."
+    docker-compose up -d nginx
 fi
 
 # Start services
